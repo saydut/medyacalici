@@ -3,6 +3,8 @@ import threading
 import os
 import sys
 import subprocess
+import webbrowser
+import requests
 from tkinter import filedialog, messagebox
 import time
 import shutil
@@ -13,6 +15,31 @@ ctk.set_default_color_theme("dark-blue")
 
 # IPC Socket Yolu (MPV'yi kontrol etmek için) - İSİM GÜNCELLENDİ
 IPC_PIPE = r'\\.\pipe\saydut_mpv_socket'
+
+# Uygulama bilgisi ve guncelleme kaynagi
+APP_VERSION = "3.1"
+PROGRAMS_URL = "https://www.saydut.com/static/programs.json"
+PROGRAM_ID = "medya-calici"
+
+# Yardimci guncelleme fonksiyonlari
+def _semver_tuple(v: str) -> tuple[int, int, int]:
+    v = (v or "").strip()
+    if v.startswith("v"):
+        v = v[1:]
+    parts = v.split(".")
+    out = []
+    for i in range(3):
+        try:
+            out.append(int(parts[i]))
+        except Exception:
+            out.append(0)
+    return tuple(out)  # type: ignore
+
+
+def _http_get_json(url: str, timeout: int = 15) -> dict:
+    response = requests.get(url, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
 
 # --- GLOBAL DEĞİŞKENLER ---
 YT_DLP_AVAILABLE = True
@@ -57,6 +84,9 @@ class SaydutMediaHub(ctk.CTk):
         self.setup_radio()
         self.setup_player()
 
+        self._update_prompted = False
+        self.after(1500, self.check_launcher_update_background)
+
     # ========================================================
     # BAĞIMLILIK KONTROLLERİ
     # ========================================================
@@ -100,6 +130,69 @@ class SaydutMediaHub(ctk.CTk):
         except Exception as e:
             messagebox.showerror("Hata", f"Kurulum hatası: {e}")
 
+    def open_launcher_update(self):
+        launcher_hint_path = r"C:\Saydut\launcher_path.txt"
+        launcher_candidates = [
+            r"C:\Saydut\SaydutLauncher\SaydutLauncher.exe",
+            r"C:\Saydut\Saydut Launcher\SaydutLauncher.exe",
+            r"C:\Saydut\SaydutLauncher\Saydut Launcher.exe",
+        ]
+
+        launcher_path = None
+        if os.path.exists(launcher_hint_path):
+            try:
+                with open(launcher_hint_path, "r", encoding="utf-8") as handle:
+                    candidate = handle.read().strip()
+                if candidate and os.path.exists(candidate):
+                    launcher_path = candidate
+            except OSError:
+                launcher_path = None
+
+        if not launcher_path:
+            launcher_path = next((p for p in launcher_candidates if os.path.exists(p)), None)
+
+        if launcher_path:
+            try:
+                if launcher_path.lower().endswith(".py"):
+                    subprocess.Popen([sys.executable, launcher_path])
+                else:
+                    subprocess.Popen([launcher_path])
+                return
+            except Exception as exc:
+                messagebox.showerror("Hata", f"Launcher acilamadi:\n{exc}")
+                return
+
+        messagebox.showinfo(
+            "Launcher Gerekli",
+            "Guncelleme icin Saydut Launcher gerekli.\nIndirip kurduktan sonra tekrar deneyin.",
+        )
+        webbrowser.open("https://www.saydut.com")
+
+    def show_update_prompt(self, latest_version: str) -> None:
+        if self._update_prompted:
+            return
+        self._update_prompted = True
+        if messagebox.askyesno(
+            "Guncelleme mevcut",
+            f"Mevcut surum: {APP_VERSION}\nYeni surum: {latest_version}\n\nLauncher acilsin mi?",
+        ):
+            self.open_launcher_update()
+
+    def check_launcher_update_background(self) -> None:
+        def worker():
+            try:
+                payload = _http_get_json(PROGRAMS_URL)
+                latest = None
+                for item in payload.get("programs", []):
+                    if item.get("id") == PROGRAM_ID:
+                        latest = item.get("version", "")
+                        break
+                if latest and _semver_tuple(latest) > _semver_tuple(APP_VERSION):
+                    self.after(0, lambda: self.show_update_prompt(latest))
+            except Exception:
+                return
+
+        threading.Thread(target=worker, daemon=True).start()
     # ========================================================
     # MPV OYNATMA MOTORU (IPC DESTEKLİ)
     # ========================================================
